@@ -327,15 +327,36 @@ df.test_scaled[, num_cols] = scale(df.test[, num_cols], center = train_mean, sca
 #df.train_scaled[, cols] = scale(df_train_PID[, cols])
 
 parameters_with_cov = c("age", "TREAT", setdiff(all.nonzero.params[[9]], c("age", "TREAT")))
-model_paste_with_cov = as.formula(
-  paste("NSAA_tot ~", paste(parameters_with_cov, collapse = " + "), "+ (1 | Patient_ID)")
-)
-
-model_with_cov = lmer(model_paste_with_cov, data = df.train_scaled)
-summary(model_with_cov)
-
 ```
 
+WITH RANDOM INTERCEPT:
+```{r}
+model_paste_with_cov = as.formula(
+  paste("NSAA_tot ~", paste(parameters_with_cov, collapse = " + ")
+        , "+ (1 | Patient_ID)")
+)
+
+model_ranint = lmer(model_paste_with_cov, data = df.train_scaled)
+summary(model_ranint)
+```
+
+WITH RANDOM INTERCEPT + SLOPE:
+```{r}
+model_paste_with_cov = as.formula(
+  paste("NSAA_tot ~", paste(parameters_with_cov, collapse = " + ")
+        , "+ (1 + age | Patient_ID)")
+)
+
+model_ranslope = lmer(model_paste_with_cov, data = df.train_scaled)
+summary(model_ranslope)
+```
+Model comparison:
+```{r}
+anova(model_ranint, model_ranslope)
+```
+Check: not worth it to add a random slope on age.
+
+Next:
 ```{r}
 
 y_test = df.test_scaled$NSAA_tot
