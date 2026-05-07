@@ -1,0 +1,452 @@
+---
+title: "NSAA analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(caret)
+library(dplyr)
+library(glmnet)
+library(car)
+library(lme4)
+library(lmerTest)
+library(MuMIn)
+```
+
+Define constants:
+
+```{r}
+# random seed:
+student.number = 4645251
+
+# train/test split:
+test.split = 0.2
+
+# cross-validation:
+val.split = 0.1
+nrepeat = 10
+```
+
+Load the data:
+
+```{r data-cleaning}
+data = read.csv('data_up_to_LoA.csv')
+if('X' %in% names(data)) data = subset(data, select=-X)
+
+# using complete cases for analysis:
+cat('full data rows:', nrow(data), '\n')
+data_cc = data[complete.cases(data$NSAA_tot),]
+data_cc = data_cc[, !(names(data_cc) %in% c('LoA', 'age_LoA_pat', 'age_LoA_hos', 'tenmtr_veloc', 'X6MWT'))]
+data_cc$TREAT = as.factor(data_cc$TREAT)
+rownames(data_cc) = NULL
+cat('complete cases rows:', nrow(data_cc), '\n')
+```
+
+Quick look at out data:
+
+```{r}
+head(data_cc)
+```
+
+How many patients do we now have with complete cases?
+```{r}
+n.patients = length(unique(data_cc$Patient_ID))
+cat('number of patients (=groups):', n.patients)
+```
+
+We first make an initial training/test split. We will evaluate the performance of
+our final mixed model with the selected predictors from the elastic net stage on
+that test set.
+
+```{r}
+set.seed(student.number)
+test.patients = sample(
+  unique(data_cc$Patient_ID)
+  , size=round(n.patients * test.split)
+  , replace = FALSE
+)
+df.test = data_cc[(data_cc$Patient_ID %in% test.patients),]
+df.train = data_cc[!(data_cc$Patient_ID %in% test.patients),]
+```
+
+
+We are going to use grouped cross-validation since we have repeated measurements.
+
+Here's the rationale for the number of groups held out in the grouped CV:
+We have 73 patients (groups), and 209 observations.
+
+First, we want to get an idea of the average # of obs per patient:
+```{r}
+ntrain.patients = n.patients - length(test.patients)
+cat(round(nrow(df.train) / ntrain.patients, 3), 'avg obs / patient')
+```
+
+Since our dataset is relatively small, we will aim for a 90/10 training/validation
+split.
+
+In short: we want to hold out 10% for validation, and 10% of 73 patients is 7.3
+patients on average to hold out.
+( This means we will hold out 10% of 209 observations for validation = 20.9 obs.
+20.900 / 2.863 = 7.300 groups
+Therefore, we want to hold out 7.3 patients on average in each train/val split. )
+
+Which means: we will use k=10 folds in ``groupKFold()``.
+
+Adjust the validation split as you wish below to get # folds:
+```{r}
+cat(paste0('validation split of ', val.split*100, '% gives ', round(1/val.split,1), ' folds'))
+```
+
+Note that the number of visits of our patients has some variance, some patients 
+have until 8 visits. Thus, some validation splits might have much more than
+20.9 observations.
+
+For this reason, we repeat the cross-validation 10 times to correct for the variance
+induced in the CV MSE by the variance in the number of visits per patient.
+
+```{r make-tune-grid}
+
+nlambda = 100  # default in glmnet
+X = subset(df.train, select=-c(Patient_ID, NSAA_tot))
+X$TREAT = as.numeric(X$TREAT) - 1  # need to make TREAT binary to calculate inner products
+y = df.train$NSAA_tot
+
+compute_lambda_max = function(X.fold, y.fold, alpha) {
+  # inspired by "Regularization paths for generalized linear models via coordinate descent" (Friedman, Hastie and Tibshirani, 2010)
+  n = nrow(X.fold)
+  y.normd = (y.fold - mean(y.fold)) / sd(y.fold) * sqrt(n / (n-1))  # glmnet uses 1/n SD for normalisation
+  X.scaled = scale(X.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
+  abs.inner.prods = abs(crossprod(X.scaled, y.normd))
+  lambda.max = max(abs.inner.prods) / (n * alpha)
+}
+
+# create folds for each repeat of the nrepeat CVs:
+nfolds = as.integer(round(1/val.split))
+random.seeds = seq(from=student.number, to=student.number + nrepeat - 1)
+all.folds = lapply(random.seeds, function(seed) {
+  set.seed(seed)
+  groupKFold(df.train$Patient_ID, k=nfolds)
+})
+
+# compute lambda.max for every training split (nfolds*nrepeat splits)
+alphas = seq(from=0, to=1, by=0.1)
+# alphas[1] = 0.001  # else lambda.max will be infinity when alpha = 0
+
+all.lmax = lapply(alphas, function(alpha) {
+  unlist(lapply(all.folds, function(cv.folds) {
+    lapply(cv.folds, function(fold.indices) {
+      X.fold = X[fold.indices,]
+      y.fold = y[fold.indices]
+      compute_lambda_max(X.fold, y.fold, alpha)
+    })
+  }))
+})
+names(all.lmax) = alphas
+
+# compute the lambda sequences for each training split (nfolds*nrepeat splits):
+compute_lambdas = function(alpha) {
+  
+  lmax.vals = all.lmax[[as.character(alpha)]]
+  lmax.max = max(lmax.vals)
+  lmax.min = min(lmax.vals)
+  # little math trick here, we need log10 because we'll create a sequence
+  # of lambdas on the log scale.
+  # we follow the advice from glmnet docs where lambda.min/lambda.max should be
+  # 0.01 in the high-dimensional case, thus:
+  if (alpha!=0) {
+    grid = expand.grid(
+      alpha=alpha
+      , lambda=10^seq(
+          from=log10(lmax.max) + 1, to=log10(lmax.min) - 1, length.out=nlambda
+        )
+      )
+  } else {
+    # Ridge case needs to be handled separately, as lambda.max is undefined when alpha is 0
+    # range of lambdas is set arbitrarily
+    grid = expand.grid(
+      alpha=0
+      , lambda=10^seq(
+          from=3, to=1, length.out=nlambda
+        )
+      )
+  }
+}
+
+tune.grid = do.call(rbind, lapply(alphas, compute_lambdas))
+```
+
+Run CV:
+
+```{r grouped-cv}
+
+# we don't need Patient_ID anymore from here on
+df_train_PID= df.train
+df.train = subset(df.train, select=-Patient_ID)
+
+elastic_net_grouped_CV = function(i) {
+  
+  folds = all.folds[[i]]
+  
+  train.control = trainControl(
+    method='cv'
+    , index=folds
+    , verboseIter = F
+  )
+
+  elastic_net = train(
+    NSAA_tot ~ .
+    , data=df.train
+    , method='glmnet'
+    , preProcess=c('center', 'scale')
+    , trControl=train.control
+    , tuneGrid=tune.grid
+  )
+}
+
+models = lapply(seq_along(random.seeds), elastic_net_grouped_CV)
+
+# average rmse's across nrepeat CV repetitions:
+avg.rmse.grid = do.call(rbind, lapply(models, function(model) {
+  model$results[, c('alpha', 'lambda', 'RMSE')]
+})) %>%
+  group_by(alpha, lambda) %>%
+  summarise(
+    rmse.avg = mean(RMSE, na.rm=TRUE)
+    , rmse.se = sd(RMSE, na.rm=TRUE) / sqrt(nrepeat)  # SE of MC estimator of rmse 
+    , .groups='drop'
+  )
+
+one_SE = function(grid)
+  # inspired by caret::oneSE()
+  {
+    grid = grid %>%
+      arrange(desc(lambda))
+    best.index = which.min(grid$rmse.avg)  
+    thresh = grid$rmse.avg[best.index] + grid$rmse.se[best.index]
+    candidates = which(grid$rmse.avg <= thresh)
+    best.iter = min(candidates)
+    list(lambda=grid$lambda[best.iter], cv.rmse=grid$rmse.avg[best.iter])
+}
+
+best.pairs = avg.rmse.grid %>%
+  group_by(alpha) %>%
+  group_map(~ {
+    best.pair = one_SE(.x)
+    data.frame(
+      alpha=.y$alpha
+      , best.lambda=best.pair$lambda
+      , cv.rmse=best.pair$cv.rmse
+    )}) %>%
+  do.call(rbind, .)
+
+```
+
+Now that we have our best (alpha, lambda) pairs, we refit an elastic net to
+our entire training set with each of these pairs:
+
+```{r}
+all.nonzero.params = list()
+
+for (i in 1:nrow(best.pairs)) {
+  
+  alpha = best.pairs$alpha[i]
+  lambda = best.pairs$best.lambda[i]
+  cv.rmse = best.pairs$cv.rmse[i]
+  
+  X.scaled = scale(X, center = TRUE, scale = TRUE)
+  
+  fit = glmnet(
+    X.scaled
+    , y
+    , family='gaussian'
+    , alpha=alpha
+    , lambda=lambda
+  )
+  coefs = coef(fit)[-1,, drop=F]  # drop the intercept, we don't need it here
+  nonzero.params = names(which(coefs[, 1] != 0))
+  all.nonzero.params[[i]] = nonzero.params
+  
+  # check condition number
+  mat.predictors = as.matrix(X[, nonzero.params])
+  cond.num = kappa(t(mat.predictors) %*% mat.predictors)
+  
+  print(paste('pair number', i, ' (alpha='
+        , alpha
+        , ', lambda='
+        , round(lambda, 3)
+        , '): '
+        , '# non-zero predictors: '
+        , length(nonzero.params)
+        , ', kappa = '
+        , round(cond.num, 3)
+        , ', CV RMSE = '
+        , round(cv.rmse, 3)
+  ))
+}
+```
+
+The retained (non-zero) predictors of pair number 'n' are stored in
+``all.nonzero.params[[n]]``.
+
+```{r}
+# pair with the lowest condition number and smallest predictor set:
+# all.nonzero.params[[9]]
+proteins = list(proteins=all.nonzero.params[[9]])
+write.csv(proteins, 'final_proteins.csv', row.names = F)
+df = read.csv('final_proteins.csv')
+df$proteins
+```
+
+Fit elastic net with best parameters
+
+
+```{r}
+# Model with covariates
+
+X_train = subset(df_train_PID, select = -c(Patient_ID, NSAA_tot))
+X_train$TREAT = df_train_PID$TREAT   # keep as factor for lmer workflow
+
+num_cols = setdiff(names(df_train_PID), c("NSAA_tot", "Patient_ID", "TREAT"))
+train_mean = sapply(df_train_PID[, num_cols], mean)
+train_sd = sapply(df_train_PID[, num_cols], sd)
+train_sd[train_sd == 0] = 1
+
+# scale
+df.train_scaled = df_train_PID
+df.train_scaled[, num_cols] = scale(df_train_PID[, num_cols], center = train_mean, scale = train_sd)
+
+df.test_scaled = df.test
+df.test_scaled[, num_cols] = scale(df.test[, num_cols], center = train_mean, scale = train_sd)
+
+
+
+#df.train_scaled = df_train_PID
+
+#cols = setdiff(names(df_train_PID), c("NSAA_tot", "Patient_ID", "TREAT"))
+#df.train_scaled[, cols] = scale(df_train_PID[, cols])
+
+parameters_with_cov = c("age", "TREAT", setdiff(all.nonzero.params[[9]], c("age", "TREAT")))
+model_paste_with_cov = as.formula(
+  paste("NSAA_tot ~", paste(parameters_with_cov, collapse = " + "), "+ (1 | Patient_ID)")
+)
+
+model_with_cov = lmer(model_paste_with_cov, data = df.train_scaled)
+summary(model_with_cov)
+
+```
+
+```{r}
+
+y_test = df.test_scaled$NSAA_tot
+y_train = df.train_scaled$NSAA_tot
+
+y_pred_with_cov = predict(
+  model_with_cov,
+  newdata = df.test_scaled,
+  allow.new.levels = TRUE
+)
+
+rmse.test = sqrt(mean((y_test - y_pred_with_cov)^2))
+rmse.test
+
+r2_with_cov = 1 - sum((y_test - y_pred_with_cov)^2) / sum((y_test - mean(y_test))^2)
+r2_with_cov
+
+```
+
+```{r}
+
+r.squaredGLMM(model_with_cov)
+
+```
+
+```{r}
+# Model without covariates
+parameters_without_cov = all.nonzero.params[[9]]
+model_paste_without_cov = as.formula(
+  paste("NSAA_tot ~", paste(parameters_without_cov, collapse = " + "), "+ (1 | Patient_ID)")
+)
+
+model_without_cov = lmer(model_paste_without_cov, data = df.train_scaled)
+summary(model_without_cov)
+```
+
+```{r}
+y_pred_without_cov = predict(
+  model_without_cov,
+  newdata = df.test_scaled,
+  allow.new.levels = TRUE
+)
+rmse.test = sqrt(mean((y_test - y_pred_without_cov)^2))
+rmse.test
+
+r2_without_cov = 1 - sum((y_test - y_pred_without_cov)^2) / sum((y_test - mean(y_test))^2)
+r2_without_cov
+```
+
+
+```{r}
+library(MuMIn)
+r.squaredGLMM(model_without_cov)
+```
+
+```{r}
+# Compare, no REML
+
+model_with_cov_anova = lmer(model_paste_with_cov, data = df.train_scaled, REML=F)
+model_without_cov_anova = lmer(model_paste_without_cov, data = df.train_scaled, REML=F)
+anova(model_with_cov_anova, model_without_cov_anova)
+```
+
+```{r}
+confint(model_with_cov)
+```
+
+R² per-patient:
+
+```{r}
+
+per_patient_rmse = function(pat) {
+
+    df.pat = df.test_scaled[df.test_scaled$Patient_ID == pat,]
+    y.test = df.pat$NSAA_tot
+
+    y.pred.with.cov = predict(
+      model_with_cov,
+      newdata = df.pat,
+      allow.new.levels = TRUE
+    )
+    rmse = round( sqrt( mean( (y.test - y.pred.with.cov)^2 ) ), 3)
+    
+    c(
+      Patient_ID=pat
+      , n.obs=nrow(df.pat)
+      , RMSE = rmse
+    )
+}
+
+test.patients = sort(test.patients)
+test.results = as.data.frame(t(sapply(test.patients, per_patient_rmse)))
+test.results = test.results[order(test.results$n.obs),]
+rownames(test.results) = NULL
+test.results
+
+ggplot(test.results, aes(x=factor(n.obs), y=RMSE, color=n.obs)) +
+  labs(x='Number of visits of the patient', y='Per-patient RMSE') +
+  geom_beeswarm(size=2.5) +
+  geom_hline(yintercept=rmse.test, lty=2, color='grey50', linewidth=0.6) +
+  scale_color_gradient(low='cyan3', high='darkblue') +
+  ggtitle('Per-patient test RMSE') +
+  theme(legend.position='none', plot.title=element_text(face='bold')) +
+  annotate(
+    'text',
+    x=min(test.results$n.obs) + 0.55,
+    y=rmse.test,
+    label='Full-sample test RMSE',
+    color='grey40',
+    hjust=1.1,
+    vjust=-0.6,
+    size=3.3
+)
+```
