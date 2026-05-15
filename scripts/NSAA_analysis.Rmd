@@ -12,6 +12,8 @@ library(car)
 library(lme4)
 library(lmerTest)
 library(MuMIn)
+library(ggplot2)
+library(ggbeeswarm)
 ```
 
 Define constants:
@@ -31,7 +33,7 @@ nrepeat = 10
 Load the data:
 
 ```{r data-cleaning}
-data = read.csv('data_up_to_LoA.csv')
+data = read.csv('../data/data_up_to_LoA.csv')
 if('X' %in% names(data)) data = subset(data, select=-X)
 
 # using complete cases for analysis:
@@ -68,6 +70,8 @@ test.patients = sample(
 )
 df.test = data_cc[(data_cc$Patient_ID %in% test.patients),]
 df.train = data_cc[!(data_cc$Patient_ID %in% test.patients),]
+(n.train = nrow(df.train))
+(n.test = nrow(df.test))
 ```
 
 
@@ -78,8 +82,9 @@ We have 73 patients (groups), and 209 observations.
 
 First, we want to get an idea of the average # of obs per patient:
 ```{r}
-ntrain.patients = n.patients - length(test.patients)
-cat(round(nrow(df.train) / ntrain.patients, 3), 'avg obs / patient')
+n.test.patients = length(test.patients)
+n.train.patients = n.patients - n.test.patients
+cat(round(nrow(df.train) / n.train.patients, 3), 'avg obs / patient')
 ```
 
 Since our dataset is relatively small, we will aim for a 90/10 training/validation
@@ -222,7 +227,7 @@ one_SE = function(grid)
   {
     grid = grid %>%
       arrange(desc(lambda))
-    best.index = which.min(grid$rmse.avg)  
+    best.index = which.min(grid$rmse.avg)
     thresh = grid$rmse.avg[best.index] + grid$rmse.se[best.index]
     candidates = which(grid$rmse.avg <= thresh)
     best.iter = min(candidates)
@@ -263,8 +268,8 @@ for (i in 1:nrow(best.pairs)) {
     , alpha=alpha
     , lambda=lambda
   )
-  coefs = coef(fit)[-1,, drop=F]  # drop the intercept, we don't need it here
-  nonzero.params = names(which(coefs[, 1] != 0))
+  coefs = coef(fit)[-1,]  # drop the intercept, we don't need it here
+  nonzero.params = names(which(coefs != 0))
   all.nonzero.params[[i]] = nonzero.params
   
   # check condition number
@@ -294,8 +299,8 @@ The retained (non-zero) predictors of pair number 'n' are stored in
 # all.nonzero.params[[9]]
 proteins = list(proteins=all.nonzero.params[[9]])
 write.csv(proteins, 'final_proteins.csv', row.names = F)
-df = read.csv('final_proteins.csv')
-df$proteins
+df = read.csv('../data/final_proteins.csv')
+selected.proteins = df$proteins
 ```
 
 Fit elastic net with best parameters
@@ -326,7 +331,7 @@ df.test_scaled[, num_cols] = scale(df.test[, num_cols], center = train_mean, sca
 #cols = setdiff(names(df_train_PID), c("NSAA_tot", "Patient_ID", "TREAT"))
 #df.train_scaled[, cols] = scale(df_train_PID[, cols])
 
-parameters_with_cov = c("age", "TREAT", setdiff(all.nonzero.params[[9]], c("age", "TREAT")))
+parameters_with_cov = c("age", "TREAT", setdiff(selected.proteins, c("age", "TREAT")))
 ```
 
 WITH RANDOM INTERCEPT:
@@ -350,10 +355,12 @@ model_paste_with_cov = as.formula(
 model_ranslope = lmer(model_paste_with_cov, data = df.train_scaled)
 summary(model_ranslope)
 ```
+
 Model comparison:
 ```{r}
 anova(model_ranint, model_ranslope)
 ```
+
 Check: not worth it to add a random slope on age.
 
 Next:
@@ -363,7 +370,7 @@ y_test = df.test_scaled$NSAA_tot
 y_train = df.train_scaled$NSAA_tot
 
 y_pred_with_cov = predict(
-  model_with_cov,
+  model_ranint,
   newdata = df.test_scaled,
   allow.new.levels = TRUE
 )
@@ -377,9 +384,7 @@ r2_with_cov
 ```
 
 ```{r}
-
 r.squaredGLMM(model_with_cov)
-
 ```
 
 ```{r}
@@ -424,6 +429,69 @@ anova(model_with_cov_anova, model_without_cov_anova)
 confint(model_with_cov)
 ```
 
+
+
+Extension (round 2):
+```{r}
+pat.counts = df.train %>% count(Patient_ID)
+
+# build design matrix of random effects:
+Z = matrix(0, n.train, n.train.patients)
+i = 1
+for (j in 1:n.train.patients) {
+  n.visits = pat.counts$n[j]
+  Z[i:(i+n.visits-1), j] = 1
+  i = i + n.visits
+}
+
+# build proxy ranef matrix:
+M = log(n.train.patients) * diag(n.train.patients)
+Pz = solve( diag(n.train) + Z %*% M %*% t(Z) )
+
+# cholesky decomp & define new y and X
+U = chol(Pz)
+
+y = df.train_scaled$NSAA_tot
+X = subset(df.train_scaled, select=parameters_with_cov)
+X$TREAT = as.numeric(X$TREAT) - 1
+X = as.matrix(X)
+y.tilde = U %*% y
+X.tilde = U %*% X
+
+# elastic net regularisation
+fit = glmnet(X.tilde, y.tilde, alpha=0.8, lambda=2.112)
+coef.round2 = coef(fit)[-1,]
+nonzero.proteins.round2 = names(which(coef.round2 != 0))
+
+# fit the random intercept LMM
+predictors.round2 = c(
+  "age", "TREAT", setdiff(nonzero.proteins.round2, c("age", "TREAT"))
+)
+formula.round2 = as.formula(
+  paste("NSAA_tot ~", paste(predictors.round2, collapse = " + ")
+        , "+ (1 | Patient_ID)")
+)
+lmm.round2 = lmer(formula.round2, data = df.train_scaled)
+summary(lmm.round2)
+
+# hold out prediction
+y.pred.round2 = predict(
+  lmm.round2,
+  newdata = df.test_scaled,
+  allow.new.levels = TRUE
+)
+
+rmse.test.round2 = sqrt(mean((y_test - y.pred.round2)^2))
+rmse.test.round2
+
+r2.test.round2 = 1 - sum((y_test - y.pred.round2)^2) / sum((y_test - mean(y_test))^2)
+r2.test.round2
+```
+save final proteins:
+```{r}
+write.csv(nonzero.proteins.round2, '../data/proteins_round2.csv', row.names = F)
+```
+
 R² per-patient:
 
 ```{r}
@@ -433,12 +501,12 @@ per_patient_rmse = function(pat) {
     df.pat = df.test_scaled[df.test_scaled$Patient_ID == pat,]
     y.test = df.pat$NSAA_tot
 
-    y.pred.with.cov = predict(
-      model_with_cov,
+    y.pred = predict(
+      lmm.round2,
       newdata = df.pat,
       allow.new.levels = TRUE
     )
-    rmse = round( sqrt( mean( (y.test - y.pred.with.cov)^2 ) ), 3)
+    rmse = round( sqrt( mean( (y.test - y.pred)^2 ) ), 3)
     
     c(
       Patient_ID=pat
@@ -453,21 +521,23 @@ test.results = test.results[order(test.results$n.obs),]
 rownames(test.results) = NULL
 test.results
 
+png(filename = '../plots/per_patient_RMSE.png', res=150, width=1200, height=800)
 ggplot(test.results, aes(x=factor(n.obs), y=RMSE, color=n.obs)) +
   labs(x='Number of visits of the patient', y='Per-patient RMSE') +
-  geom_beeswarm(size=2.5) +
-  geom_hline(yintercept=rmse.test, lty=2, color='grey50', linewidth=0.6) +
+  geom_beeswarm(size=4) +
+  geom_hline(yintercept=rmse.test.round2, lty=2, color='grey50', linewidth=0.6) +
   scale_color_gradient(low='cyan3', high='darkblue') +
   ggtitle('Per-patient test RMSE') +
   theme(legend.position='none', plot.title=element_text(face='bold')) +
   annotate(
     'text',
-    x=min(test.results$n.obs) + 0.55,
-    y=rmse.test,
+    x=max(test.results$n.obs)+1,
+    y=rmse.test.round2,
     label='Full-sample test RMSE',
     color='grey40',
     hjust=1.1,
     vjust=-0.6,
     size=3.3
 )
+dev.off()
 ```

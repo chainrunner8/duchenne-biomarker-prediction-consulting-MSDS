@@ -1,0 +1,60 @@
+---
+title: "data_viz"
+output: html_document
+date: "2026-04-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(pheatmap)
+library(ptmixed)
+```
+
+Load data:
+```{r}
+data = read.csv('../data/data_up_to_LoA.csv')
+data.cc = data[complete.cases(data$NSAA_tot),]
+```
+
+Spaghetti plot:
+```{r}
+make.spaghetti(
+  x=age
+  , y=NSAA_tot
+  , id=Patient_ID
+  , data=data.cc
+)
+```
+
+Heatmap:
+```{r heatmap}
+df.proteins = read.csv('../data/proteins_round2.csv')
+
+mat.proteins = subset(data.cc, select=df.proteins$x)
+mat.proteins.scaled = t(scale(mat.proteins))
+
+col.annotation = data.frame(
+  # Patient    = data.cc$Patient_ID,
+  # Timepoint  = timepoints,
+  NSAA_tot    = data.cc$NSAA_tot,
+  Ambulation = ifelse(data.cc$NSAA_tot == 0, 'Non-ambulant', 'Ambulant')
+)
+rownames(col.annotation) = colnames(mat.proteins.scaled)
+
+png(filename = '../plots/heatmap_seven_proteins.png', res=150, width=1200, height=800)
+pheatmap(
+  mat.proteins.scaled,
+  breaks=seq(-3,3, length.out=101),
+  annotation_col=col.annotation,
+  clustering_distance_cols = 'correlation',
+  clustering_distance_rows = 'correlation',
+  clustering_method='ward.D2',
+  show_colnames= FALSE  # patient-time labels get crowded
+)
+dev.off()
+```
+
+```{r}
+head(data.cc)
+```
+
