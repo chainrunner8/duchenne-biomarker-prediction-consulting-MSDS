@@ -119,10 +119,10 @@ y = df.train$NSAA_tot
 
 compute_lambda_max = function(X.fold, y.fold, alpha) {
   # inspired by "Regularization paths for generalized linear models via coordinate descent" (Friedman, Hastie and Tibshirani, 2010)
-  n = nrow(X.fold)
-  y.normd = (y.fold - mean(y.fold)) / sd(y.fold) * sqrt(n / (n-1))  # glmnet uses 1/n SD for normalisation
+  n = length(y.fold)
   X.scaled = scale(X.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
-  abs.inner.prods = abs(crossprod(X.scaled, y.normd))
+  y.scaled = y.fold - mean(y.fold)
+  abs.inner.prods = abs(crossprod(X.scaled, y.scaled))
   lambda.max = max(abs.inner.prods) / (n * alpha)
 }
 
@@ -130,40 +130,52 @@ compute_lambda_max = function(X.fold, y.fold, alpha) {
 nfolds = as.integer(round(1/val.split))
 random.seeds = seq(from=student.number, to=student.number + nrepeat - 1)
 all.folds = lapply(random.seeds, function(seed) {
-  set.seed(seed)
-  groupKFold(df.train$Patient_ID, k=nfolds)
-})
+    set.seed(seed)
+    groupKFold(df.train$Patient_ID, k=nfolds)
+  })
 
 # compute lambda.max for every training split (nfolds*nrepeat splits)
 alphas = seq(from=0, to=1, by=0.1)
-# alphas[1] = 0.001  # else lambda.max will be infinity when alpha = 0
 
-all.lmax = lapply(alphas, function(alpha) {
+# scaled.folds = lapply(all.folds, function(cv.folds) {
+#     lapply(cv.folds, function(fold.indices) {
+#         X.fold = X[fold.indices,]
+#         y.fold = y[fold.indices]
+#         n = nrow(y.fold)
+#         # glmnet uses 1/n SD for normalisation
+#         X.scaled = scale(X.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
+#         y.scaled = scale(y.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
+#         list(X=X.scaled, y=y.scaled)
+#       })
+#   })
+
+all.lmax = lapply(alphas[-1], function(alpha) {
   unlist(lapply(all.folds, function(cv.folds) {
     lapply(cv.folds, function(fold.indices) {
-      X.fold = X[fold.indices,]
-      y.fold = y[fold.indices]
-      compute_lambda_max(X.fold, y.fold, alpha)
-    })
-  }))
-})
-names(all.lmax) = alphas
+        X.fold = X[fold.indices,]
+        y.fold = y[fold.indices]
+        compute_lambda_max(X.fold, y.fold, alpha)
+      })
+    }))
+  })
+names(all.lmax) = alphas[-1]
 
 # compute the lambda sequences for each training split (nfolds*nrepeat splits):
 compute_lambdas = function(alpha) {
   
-  lmax.vals = all.lmax[[as.character(alpha)]]
-  lmax.max = max(lmax.vals)
-  lmax.min = min(lmax.vals)
   # little math trick here, we need log10 because we'll create a sequence
   # of lambdas on the log scale.
   # we follow the advice from glmnet docs where lambda.min/lambda.max should be
   # 0.01 in the high-dimensional case, thus:
   if (alpha!=0) {
+    lmax.vals = all.lmax[[as.character(alpha)]]
+    lmax.max = max(lmax.vals)
+    lmax.min = min(lmax.vals)
+    
     grid = expand.grid(
       alpha=alpha
       , lambda=10^seq(
-          from=log10(lmax.max) + 1, to=log10(lmax.min) - 1, length.out=nlambda
+          from=log10(lmax.max), to=log10(lmax.min)-2, length.out=nlambda
         )
       )
   } else {
@@ -203,7 +215,7 @@ elastic_net_grouped_CV = function(i) {
     NSAA_tot ~ .
     , data=df.train
     , method='glmnet'
-    , preProcess=c('center', 'scale')
+    , standardize = TRUE
     , trControl=train.control
     , tuneGrid=tune.grid
   )
@@ -246,6 +258,14 @@ best.pairs = avg.rmse.grid %>%
   do.call(rbind, .)
 
 ```
+
+
+Diagnose the lambda situation:
+```{r}
+model.results = models[3][[1]]$results
+model.results[model.results$alpha==0.9,]
+```
+
 
 Now that we have our best (alpha, lambda) pairs, we refit an elastic net to
 our entire training set with each of these pairs:
@@ -495,7 +515,6 @@ write.csv(nonzero.proteins.round2, '../data/proteins_round2.csv', row.names = F)
 R² per-patient:
 
 ```{r}
-
 per_patient_rmse = function(pat) {
 
     df.pat = df.test_scaled[df.test_scaled$Patient_ID == pat,]
