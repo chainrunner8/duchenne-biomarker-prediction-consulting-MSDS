@@ -120,11 +120,25 @@ y = df.train$NSAA_tot
 compute_lambda_max = function(X.fold, y.fold, alpha) {
   # inspired by "Regularization paths for generalized linear models via coordinate descent" (Friedman, Hastie and Tibshirani, 2010)
   n = length(y.fold)
-  X.scaled = scale(X.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
-  y.scaled = y.fold - mean(y.fold)
-  abs.inner.prods = abs(crossprod(X.scaled, y.scaled))
+  # below, we standardise X, the same way glmnet does internally
+  # during the CV, for consistency (we cross-checked with glmnet function).
+  # glmnet uses 1/n standard deviation, so we follow that here too
+  X.stand = scale(X.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
+  abs.inner.prods = abs(crossprod(X.stand, y.fold))
   lambda.max = max(abs.inner.prods) / (n * alpha)
 }
+
+# compute_lambda_max_glmnet = function(X.fold, y.fold, alpha) {
+#   fit = glmnet(
+#     X.fold
+#     , y.fold
+#     , alpha=alpha
+#     , family='gaussian'
+#     , standardize=TRUE
+#     , nlambda=nlambda
+#   )
+#   max(fit$lambda)
+# }
 
 # create folds for each repeat of the nrepeat CVs:
 nfolds = as.integer(round(1/val.split))
@@ -154,7 +168,9 @@ all.lmax = lapply(alphas[-1], function(alpha) {
     lapply(cv.folds, function(fold.indices) {
         X.fold = X[fold.indices,]
         y.fold = y[fold.indices]
-        compute_lambda_max(X.fold, y.fold, alpha)
+        lmax.manual = compute_lambda_max(X.fold, y.fold, alpha)
+        # lmax.glmnet = compute_lambda_max_glmnet(X.fold, y.fold, alpha)
+        # print(cat('manual:',lmax.manual,'glmnet:',lmax.glmnet))
       })
     }))
   })
@@ -175,7 +191,7 @@ compute_lambdas = function(alpha) {
     grid = expand.grid(
       alpha=alpha
       , lambda=10^seq(
-          from=log10(lmax.max), to=log10(lmax.min)-2, length.out=nlambda
+          from=log10(lmax.max), to=(log10(lmax.min)-2), length.out=nlambda
         )
       )
   } else {
@@ -258,11 +274,13 @@ best.pairs = avg.rmse.grid %>%
   do.call(rbind, .)
 
 ```
-
+Note: the "There were missing values in resampled performance measures." warnings
+are normal, when the lambda being fitted with is equal or greater than lambda.max
+in some folds, the r-squared is NaN since the variance of the predictions is zero (intercept model).
 
 Diagnose the lambda situation:
 ```{r}
-model.results = models[3][[1]]$results
+model.results = models[7][[1]]$results
 model.results[model.results$alpha==0.9,]
 ```
 
@@ -316,11 +334,12 @@ The retained (non-zero) predictors of pair number 'n' are stored in
 
 ```{r}
 # pair with the lowest condition number and smallest predictor set:
-# all.nonzero.params[[9]]
-proteins = list(proteins=all.nonzero.params[[9]])
-write.csv(proteins, 'final_proteins.csv', row.names = F)
+# all.nonzero.params[[8]]
+# proteins = list(proteins=all.nonzero.params[[9]])
+# write.csv(proteins, 'final_proteins.csv', row.names = F)
 df = read.csv('../data/final_proteins.csv')
 selected.proteins = df$proteins
+selected.proteins
 ```
 
 Fit elastic net with best parameters
@@ -343,13 +362,6 @@ df.train_scaled[, num_cols] = scale(df_train_PID[, num_cols], center = train_mea
 
 df.test_scaled = df.test
 df.test_scaled[, num_cols] = scale(df.test[, num_cols], center = train_mean, scale = train_sd)
-
-
-
-#df.train_scaled = df_train_PID
-
-#cols = setdiff(names(df_train_PID), c("NSAA_tot", "Patient_ID", "TREAT"))
-#df.train_scaled[, cols] = scale(df_train_PID[, cols])
 
 parameters_with_cov = c("age", "TREAT", setdiff(selected.proteins, c("age", "TREAT")))
 ```
@@ -453,7 +465,7 @@ confint(model_with_cov)
 
 Extension (round 2):
 ```{r}
-pat.counts = df.train %>% count(Patient_ID)
+pat.counts = df_train_PID %>% count(Patient_ID)
 
 # build design matrix of random effects:
 Z = matrix(0, n.train, n.train.patients)
@@ -479,7 +491,9 @@ y.tilde = U %*% y
 X.tilde = U %*% X
 
 # elastic net regularisation
-fit = glmnet(X.tilde, y.tilde, alpha=0.8, lambda=2.112)
+alpha = best.pairs$alpha[8]
+lambda = best.pairs$best.lambda[8]
+fit = glmnet(X.tilde, y.tilde, alpha=alpha, lambda=lambda)
 coef.round2 = coef(fit)[-1,]
 nonzero.proteins.round2 = names(which(coef.round2 != 0))
 
@@ -501,16 +515,39 @@ y.pred.round2 = predict(
   allow.new.levels = TRUE
 )
 
-rmse.test.round2 = sqrt(mean((y_test - y.pred.round2)^2))
+y.test = df.test_scaled$NSAA_tot
+rmse.test.round2 = sqrt(mean((y.test - y.pred.round2)^2))
 rmse.test.round2
 
-r2.test.round2 = 1 - sum((y_test - y.pred.round2)^2) / sum((y_test - mean(y_test))^2)
+r2.test.round2 = 1 - sum((y.test - y.pred.round2)^2) / sum((y.test - mean(y.test))^2)
 r2.test.round2
 ```
 save final proteins:
 ```{r}
 write.csv(nonzero.proteins.round2, '../data/proteins_round2.csv', row.names = F)
 ```
+
+
+```{r}
+r.squaredGLMM(lmm.round2)
+```
+
+WITH RANDOM INTERCEPT + SLOPE:
+```{r}
+rslope.formula = as.formula(
+  paste("NSAA_tot ~", paste(predictors.round2, collapse = " + ")
+        , "+ (1 + age | Patient_ID)")
+)
+
+lmm.round2.rslope = lmer(rslope.formula, data = df.train_scaled)
+summary(lmm.round2.rslope)
+```
+
+Model comparison:
+```{r}
+anova(lmm.round2, lmm.round2.rslope)
+```
+Check: not worth it to add a random slope on age.
 
 R² per-patient:
 
