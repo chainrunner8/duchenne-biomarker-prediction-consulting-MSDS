@@ -70,6 +70,9 @@ test.patients = sample(
 )
 df.test = data_cc[(data_cc$Patient_ID %in% test.patients),]
 df.train = data_cc[!(data_cc$Patient_ID %in% test.patients),]
+
+train.patients = unique(df.train$Patient_ID)
+
 (n.train = nrow(df.train))
 (n.test = nrow(df.test))
 ```
@@ -344,13 +347,8 @@ selected.proteins
 
 Fit elastic net with best parameters
 
-
 ```{r}
 # Model with covariates
-
-X_train = subset(df_train_PID, select = -c(Patient_ID, NSAA_tot))
-X_train$TREAT = df_train_PID$TREAT   # keep as factor for lmer workflow
-
 num_cols = setdiff(names(df_train_PID), c("NSAA_tot", "Patient_ID", "TREAT"))
 train_mean = sapply(df_train_PID[, num_cols], mean)
 train_sd = sapply(df_train_PID[, num_cols], sd)
@@ -363,104 +361,8 @@ df.train_scaled[, num_cols] = scale(df_train_PID[, num_cols], center = train_mea
 df.test_scaled = df.test
 df.test_scaled[, num_cols] = scale(df.test[, num_cols], center = train_mean, scale = train_sd)
 
-parameters_with_cov = c("age", "TREAT", setdiff(selected.proteins, c("age", "TREAT")))
+parameters.with.cov = c("age", "TREAT", setdiff(selected.proteins, c("age", "TREAT")))
 ```
-
-WITH RANDOM INTERCEPT:
-```{r}
-model_paste_with_cov = as.formula(
-  paste("NSAA_tot ~", paste(parameters_with_cov, collapse = " + ")
-        , "+ (1 | Patient_ID)")
-)
-
-model_ranint = lmer(model_paste_with_cov, data = df.train_scaled)
-summary(model_ranint)
-```
-
-WITH RANDOM INTERCEPT + SLOPE:
-```{r}
-model_paste_with_cov = as.formula(
-  paste("NSAA_tot ~", paste(parameters_with_cov, collapse = " + ")
-        , "+ (1 + age | Patient_ID)")
-)
-
-model_ranslope = lmer(model_paste_with_cov, data = df.train_scaled)
-summary(model_ranslope)
-```
-
-Model comparison:
-```{r}
-anova(model_ranint, model_ranslope)
-```
-
-Check: not worth it to add a random slope on age.
-
-Next:
-```{r}
-
-y_test = df.test_scaled$NSAA_tot
-y_train = df.train_scaled$NSAA_tot
-
-y_pred_with_cov = predict(
-  model_ranint,
-  newdata = df.test_scaled,
-  allow.new.levels = TRUE
-)
-
-rmse.test = sqrt(mean((y_test - y_pred_with_cov)^2))
-rmse.test
-
-r2_with_cov = 1 - sum((y_test - y_pred_with_cov)^2) / sum((y_test - mean(y_test))^2)
-r2_with_cov
-
-```
-
-```{r}
-r.squaredGLMM(model_with_cov)
-```
-
-```{r}
-# Model without covariates
-parameters_without_cov = all.nonzero.params[[9]]
-model_paste_without_cov = as.formula(
-  paste("NSAA_tot ~", paste(parameters_without_cov, collapse = " + "), "+ (1 | Patient_ID)")
-)
-
-model_without_cov = lmer(model_paste_without_cov, data = df.train_scaled)
-summary(model_without_cov)
-```
-
-```{r}
-y_pred_without_cov = predict(
-  model_without_cov,
-  newdata = df.test_scaled,
-  allow.new.levels = TRUE
-)
-rmse.test = sqrt(mean((y_test - y_pred_without_cov)^2))
-rmse.test
-
-r2_without_cov = 1 - sum((y_test - y_pred_without_cov)^2) / sum((y_test - mean(y_test))^2)
-r2_without_cov
-```
-
-
-```{r}
-library(MuMIn)
-r.squaredGLMM(model_without_cov)
-```
-
-```{r}
-# Compare, no REML
-
-model_with_cov_anova = lmer(model_paste_with_cov, data = df.train_scaled, REML=F)
-model_without_cov_anova = lmer(model_paste_without_cov, data = df.train_scaled, REML=F)
-anova(model_with_cov_anova, model_without_cov_anova)
-```
-
-```{r}
-confint(model_with_cov)
-```
-
 
 
 Extension (round 2):
@@ -484,7 +386,7 @@ Pz = solve( diag(n.train) + Z %*% M %*% t(Z) )
 U = chol(Pz)
 
 y = df.train_scaled$NSAA_tot
-X = subset(df.train_scaled, select=parameters_with_cov)
+X = subset(df.train_scaled, select=parameters.with.cov)
 X$TREAT = as.numeric(X$TREAT) - 1
 X = as.matrix(X)
 y.tilde = U %*% y
@@ -524,7 +426,7 @@ r2.test.round2
 ```
 save final proteins:
 ```{r}
-write.csv(nonzero.proteins.round2, '../data/proteins_round2.csv', row.names = F)
+# write.csv(nonzero.proteins.round2, '../data/proteins_round2.csv', row.names = F)
 ```
 
 
@@ -577,7 +479,7 @@ test.results = test.results[order(test.results$n.obs),]
 rownames(test.results) = NULL
 test.results
 
-png(filename = '../plots/per_patient_RMSE.png', res=150, width=1200, height=800)
+# png(filename = '../plots/per_patient_RMSE.png', res=150, width=1200, height=800)
 ggplot(test.results, aes(x=factor(n.obs), y=RMSE, color=n.obs)) +
   labs(x='Number of visits of the patient', y='Per-patient RMSE') +
   geom_beeswarm(size=4) +
@@ -595,5 +497,144 @@ ggplot(test.results, aes(x=factor(n.obs), y=RMSE, color=n.obs)) +
     vjust=-0.6,
     size=3.3
 )
-dev.off()
+# dev.off()
+```
+
+
+Checking linearity:
+
+```{r}
+fitted.val = fitted(lmm.round2)
+raw.resid = resid(lmm.round2)
+jack.resid = rstudent(lmm.round2)
+
+# obs vs fitted
+plot(fitted.val, df.train$NSAA_tot
+     , xlab = "Fitted value"
+     , ylab = "NSAA_tot"
+     , main='Observed NSAA_tot vs fitted values')
+
+# qq plots
+# png(filename = '../plots/jack_qq.png', res=150, width=1200, height=900)
+qqnorm(jack.resid, main = 'Jackknife conditional residual Q-Q plot')
+qqline(jack.resid, col = "red")
+# dev.off()
+
+qqnorm(raw.resid, main = 'Raw conditional residual Q-Q plot')
+qqline(raw.resid, col = "red")
+
+# histograms
+hist(jack.resid, breaks = 30, main = 'Jackknife conditional residuals histogram', 
+     xlab='Jackknife conditional residual')
+hist(raw.resid, breaks = 30, main = 'Raw conditional residuals histogram', 
+     xlab='Raw conditional residual')
+
+# resid vs fitted
+plot(fitted.val, raw.resid,
+     xlab = "Fitted value",
+     ylab = "Raw conditional residual",
+     main = "Raw conditional residuals vs fitted values")
+abline(h = 0, col = "red")
+lines(lowess(fitted.val, raw.resid),
+      col = "blue", lwd = 2)
+
+# png(filename = '../plots/jack_vs_fitted.png', res=150, width=1200, height=900)
+plot(fitted.val, jack.resid,
+     xlab = "Fitted value",
+     ylab = "Jackknife conditional residual",
+     main = "Jackknife conditional residuals vs fitted values")
+abline(h = 0, col = "red")
+lines(lowess(fitted.val, jack.resid),
+      col = "blue", lwd = 2)
+# dev.off()
+```
+Here we look at the random effects diagnostic plots:
+
+```{r}
+ran.int = ranef(lmm.round2)$Patient_ID
+jack.resid = rstudent(lmm.round2)
+
+dfs = lapply(train.patients, function(p){
+      rows = rownames(df_train_PID[df_train_PID$Patient_ID == p,])
+      pat.resid = unname(jack.resid[rows])
+      pat.ranint = rep(ran.int[as.character(p),], length(pat.resid))
+      data.frame(residual=pat.resid, ranint=pat.ranint)
+    }
+)
+df.resid.ranint = bind_rows(dfs)
+
+# png(filename = '../plots/jack_vs_ranint.png', res=150, width=1200, height=900)
+ggplot(df.resid.ranint, aes(x=ranint, y=residual)) +
+  labs(x='Random intercept', y='Jackknife residual') +
+  geom_point(size=2, shape=1) +
+  geom_smooth(method='loess', se=F, fullrange=F
+              , method.args=list(degree =1, family = 'gaussian')) +
+  scale_color_gradient(low='cyan3', high='darkblue') +
+  ggtitle('Jackknife conditional residuals vs random effects') +
+  theme(legend.position='none', plot.title=element_text(face='bold'))
+# dev.off()
+
+# png(filename = '../plots/jack_vs_ranint.png', res=150, width=1200, height=900)
+plot(df.resid.ranint$ranint, df.resid.ranint$residual,
+     xlab = "Random intercept",
+     ylab = "Jackknife conditional residual",
+     main = "Jackknife conditional residuals vs random intercepts")
+abline(h = 0, col = "red")
+lines(lowess(df.resid.ranint$ranint, df.resid.ranint$residual),
+      col = "blue", lwd = 2)
+# dev.off()
+
+hist(ran.int$`(Intercept)`, breaks=20, xlab='Random intercept'
+     , main='Histogram of random intercepts')
+
+# png(filename = '../plots/ranint_hist.png', res=150, width=1200, height=900)
+ggplot(ran.int, aes(x=`(Intercept)`)) + 
+  labs(x='Random intercept', y='Frequency') +
+  geom_histogram(binwidth = 1, colour='black', fill='grey') +
+  geom_density(aes(y = after_stat(density * nrow(ran.int) * 1)),
+               alpha=.2, fill="#FF6666") +
+  ggtitle('Histogram of random intercepts')
+# dev.off()
+```
+
+
+Rank coefficients:
+
+```{r}
+coefs.model = summary(lmm.round2)$coefficients
+coefs.model = coefs.model[rownames(coefs.model) != "(Intercept)", ]
+coefs.model
+
+ranked_coefs_est = data.frame(
+  variable = rownames(coefs.model),
+  estimate = coefs.model[, "Estimate"],
+  row.names = NULL
+)
+ranked_coefs_est = ranked_coefs_est[order(abs(ranked_coefs_est$estimate), decreasing = TRUE), ]
+ranked_coefs_est
+```
+
+```{r}
+#plot(NSAA_tot ~ ., data = data_cc);lines(weighted.mean(data_cc$NSAA_tot))
+```
+
+```{r}
+library(lme4)
+library(influence.ME)
+
+model_lme4 <- lme4::lmer(
+  NSAA_tot ~ X10440.26 + X11277.23+ X12549.33+ X13114.50+ X15386.7+ X15559.5+  X19630.2+  X3220.40+  X3709.4+  X4929.55+  X5000.52+  X5483.1+   X5542.22+  X5864.10+  X7970.315+ X8080.24+ X8300.82+  X8484.24+ X9851.9 +
+    age + TREAT + (1 | Patient_ID), data = df.train_scaled)
+
+infl <- influence(model_lme4, group = "Patient_ID")
+
+cd <- cooks.distance(infl)
+plot(cd, type = "h",
+     ylab = "Cook's distance",
+     xlab = "Patient",
+     main = "Patient-level influence")
+
+plot(cd, main = "Cooks Distance for Influential Obs");abline(h = 4/length(unique(df.train_scaled$Patient_ID)), lty = 2, col = "steelblue")
+
+
 ```
