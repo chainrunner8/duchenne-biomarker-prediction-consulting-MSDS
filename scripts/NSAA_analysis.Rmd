@@ -516,7 +516,7 @@ plot(fitted.val, df.train$NSAA_tot
 
 # qq plots
 # png(filename = '../plots/jack_qq.png', res=150, width=1200, height=900)
-qqnorm(jack.resid, main = 'Jackknife conditional residual Q-Q plot')
+qqnorm(jack.resid, main = 'Jackknife conditional residuals Q-Q plot')
 qqline(jack.resid, col = "red")
 # dev.off()
 
