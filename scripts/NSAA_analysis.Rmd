@@ -262,7 +262,8 @@ one_SE = function(grid)
     thresh = grid$rmse.avg[best.index] + grid$rmse.se[best.index]
     candidates = which(grid$rmse.avg <= thresh)
     best.iter = min(candidates)
-    list(lambda=grid$lambda[best.iter], cv.rmse=grid$rmse.avg[best.iter])
+    list(lambda=grid$lambda[best.iter], cv.rmse=grid$rmse.avg[best.iter]
+         , rmse.se=grid$rmse.se[best.iter])
 }
 
 best.pairs = avg.rmse.grid %>%
@@ -272,7 +273,8 @@ best.pairs = avg.rmse.grid %>%
     data.frame(
       alpha=.y$alpha
       , best.lambda=best.pair$lambda
-      , cv.rmse=best.pair$cv.rmse
+      , rmse=best.pair$cv.rmse
+      , rmse.se=best.pair$rmse.se
     )}) %>%
   do.call(rbind, .)
 
@@ -298,7 +300,8 @@ for (i in 1:nrow(best.pairs)) {
   
   alpha = best.pairs$alpha[i]
   lambda = best.pairs$best.lambda[i]
-  cv.rmse = best.pairs$cv.rmse[i]
+  rmse = best.pairs$rmse[i]
+  rmse.se = best.pairs$rmse.se[i]
   
   X.scaled = scale(X, center = TRUE, scale = TRUE)
   
@@ -327,7 +330,9 @@ for (i in 1:nrow(best.pairs)) {
         , ', kappa = '
         , round(cond.num, 3)
         , ', CV RMSE = '
-        , round(cv.rmse, 3)
+        , round(rmse, 3)
+        , ', RMSE SE = '
+        , round(rmse.se, 3)
   ))
 }
 ```
@@ -383,6 +388,7 @@ M = log(n.train.patients) * diag(n.train.patients)
 Pz = solve( diag(n.train) + Z %*% M %*% t(Z) )
 
 # cholesky decomp & define new y and X
+# chol() returns upper triangular factor
 U = chol(Pz)
 
 y = df.train_scaled$NSAA_tot
@@ -538,15 +544,15 @@ abline(h = 0, col = "red")
 lines(lowess(fitted.val, raw.resid),
       col = "blue", lwd = 2)
 
-# png(filename = '../plots/jack_vs_fitted.png', res=150, width=1200, height=900)
+png(filename = '../plots/jack_vs_fitted.png', res=150, width=1200, height=900)
 plot(fitted.val, jack.resid,
      xlab = "Fitted value",
-     ylab = "Jackknife conditional residual",
+     ylab = "Residual",
      main = "Jackknife conditional residuals vs fitted values")
 abline(h = 0, col = "red")
 lines(lowess(fitted.val, jack.resid),
       col = "blue", lwd = 2)
-# dev.off()
+dev.off()
 ```
 Here we look at the random effects diagnostic plots:
 
@@ -577,7 +583,7 @@ ggplot(df.resid.ranint, aes(x=ranint, y=residual)) +
 # png(filename = '../plots/jack_vs_ranint.png', res=150, width=1200, height=900)
 plot(df.resid.ranint$ranint, df.resid.ranint$residual,
      xlab = "Random intercept",
-     ylab = "Jackknife conditional residual",
+     ylab = "Residual",
      main = "Jackknife conditional residuals vs random intercepts")
 abline(h = 0, col = "red")
 lines(lowess(df.resid.ranint$ranint, df.resid.ranint$residual),
