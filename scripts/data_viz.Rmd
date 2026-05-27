@@ -41,7 +41,7 @@ col.annotation = data.frame(
 )
 rownames(col.annotation) = colnames(mat.proteins.scaled)
 
-png(filename = '../plots/heatmap_seven_proteins.png', res=150, width=1200, height=800)
+png(filename = '../plots/heatmap_seven_proteins.png', res=150, width=1200, height=900)
 pheatmap(
   mat.proteins.scaled,
   breaks=seq(-3,3, length.out=101),
@@ -53,8 +53,3 @@ pheatmap(
 )
 dev.off()
 ```
-
-```{r}
-head(data.cc)
-```
-

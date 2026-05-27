@@ -30,64 +30,69 @@ val.split = 0.1
 nrepeat = 10
 ```
 
-Load the data:
+
+! IMPORTANT !
+
+Please run "data_cleaning.R" before running this notebook to extract the data 
+until LoA, which is needed to go on with the analysis.
+
+Load the data until LoA:
 
 ```{r data-cleaning}
 data = read.csv('../data/data_up_to_LoA.csv')
-if('X' %in% names(data)) data = subset(data, select=-X)
+# View(data)
 
-# using complete cases for analysis:
+# we use complete cases for analysis, rows with missing NSAA_tot are discarded:
 cat('full data rows:', nrow(data), '\n')
-data_cc = data[complete.cases(data$NSAA_tot),]
-data_cc = data_cc[, !(names(data_cc) %in% c('LoA', 'age_LoA_pat', 'age_LoA_hos', 'tenmtr_veloc', 'X6MWT'))]
-data_cc$TREAT = as.factor(data_cc$TREAT)
-rownames(data_cc) = NULL
-cat('complete cases rows:', nrow(data_cc), '\n')
-```
-
-Quick look at out data:
-
-```{r}
-head(data_cc)
+data.cc = data[complete.cases(data$NSAA_tot),]
+data.cc = data.cc[, !(names(data.cc) %in% c('LoA', 'age_LoA_pat', 'age_LoA_hos', 'tenmtr_veloc', 'X6MWT'))]
+data.cc$TREAT = as.factor(data.cc$TREAT)
+rownames(data.cc) = NULL
+cat('complete cases rows:', nrow(data.cc), '\n')
 ```
 
 How many patients do we now have with complete cases?
 ```{r}
-n.patients = length(unique(data_cc$Patient_ID))
-cat('number of patients (=groups):', n.patients)
+npatients = length(unique(data.cc$Patient_ID))
+cat('number of patients (=groups):', npatients)
 ```
 
-We first make an initial training/test split. We will evaluate the performance of
+We first make an initial 80%/20% training/test split. We will evaluate the performance of
 our final mixed model with the selected predictors from the elastic net stage on
 that test set.
 
 ```{r}
 set.seed(student.number)
+
 test.patients = sample(
-  unique(data_cc$Patient_ID)
-  , size=round(n.patients * test.split)
+  unique(data.cc$Patient_ID)
+  , size=round(npatients * test.split)
   , replace = FALSE
 )
-df.test = data_cc[(data_cc$Patient_ID %in% test.patients),]
-df.train = data_cc[!(data_cc$Patient_ID %in% test.patients),]
 
-train.patients = unique(df.train$Patient_ID)
+df.test = data.cc[(data.cc$Patient_ID %in% test.patients),]
+df.train = data.cc[!(data.cc$Patient_ID %in% test.patients),]
 
-(n.train = nrow(df.train))
-(n.test = nrow(df.test))
+trainpatients = unique(df.train$Patient_ID)
+
+ntrain = nrow(df.train)
+ntest = nrow(df.test)
+cat('training set visits:', ntrain,'\n')
+cat('training set patients:', length(trainpatients),'\n','\n')
+cat('test set visits:', ntest,'\n')
+cat('test set patients:', length(test.patients))
 ```
 
-
-We are going to use grouped cross-validation since we have repeated measurements.
+We are going to use grouped cross-validation since there is clustering (repeated measures).
 
 Here's the rationale for the number of groups held out in the grouped CV:
 We have 73 patients (groups), and 209 observations.
 
 First, we want to get an idea of the average # of obs per patient:
 ```{r}
-n.test.patients = length(test.patients)
-n.train.patients = n.patients - n.test.patients
-cat(round(nrow(df.train) / n.train.patients, 3), 'avg obs / patient')
+ntest.patients = length(test.patients)
+ntrainpatients = npatients - ntest.patients
+cat(round(nrow(df.train) / ntrainpatients, 3), 'avg obs / patient')
 ```
 
 Since our dataset is relatively small, we will aim for a 90/10 training/validation
@@ -370,17 +375,17 @@ Extension (round 2):
 pat.counts = df_train_PID %>% count(Patient_ID)
 
 # build design matrix of random effects:
-Z = matrix(0, n.train, n.train.patients)
+Z = matrix(0, ntrain, ntrainpatients)
 i = 1
-for (j in 1:n.train.patients) {
+for (j in 1:ntrainpatients) {
   n.visits = pat.counts$n[j]
   Z[i:(i+n.visits-1), j] = 1
   i = i + n.visits
 }
 
 # build proxy ranef matrix:
-M = log(n.train.patients) * diag(n.train.patients)
-Pz = solve( diag(n.train) + Z %*% M %*% t(Z) )
+M = log(ntrainpatients) * diag(ntrainpatients)
+Pz = solve( diag(ntrain) + Z %*% M %*% t(Z) )
 
 # cholesky decomp & define new y and X
 U = chol(Pz)
@@ -479,9 +484,9 @@ test.results = test.results[order(test.results$n.obs),]
 rownames(test.results) = NULL
 test.results
 
-# png(filename = '../plots/per_patient_RMSE.png', res=150, width=1200, height=800)
+png(filename = '../plots/per_patient_RMSE.png', res=150, width=1200, height=900)
 ggplot(test.results, aes(x=factor(n.obs), y=RMSE, color=n.obs)) +
-  labs(x='Number of visits of the patient', y='Per-patient RMSE') +
+  labs(x='Patient visits', y='Patient RMSE') +
   geom_beeswarm(size=4) +
   geom_hline(yintercept=rmse.test.round2, lty=2, color='grey50', linewidth=0.6) +
   scale_color_gradient(low='cyan3', high='darkblue') +
@@ -497,7 +502,7 @@ ggplot(test.results, aes(x=factor(n.obs), y=RMSE, color=n.obs)) +
     vjust=-0.6,
     size=3.3
 )
-# dev.off()
+dev.off()
 ```
 
 
@@ -554,7 +559,7 @@ Here we look at the random effects diagnostic plots:
 ran.int = ranef(lmm.round2)$Patient_ID
 jack.resid = rstudent(lmm.round2)
 
-dfs = lapply(train.patients, function(p){
+dfs = lapply(trainpatients, function(p){
       rows = rownames(df_train_PID[df_train_PID$Patient_ID == p,])
       pat.resid = unname(jack.resid[rows])
       pat.ranint = rep(ran.int[as.character(p),], length(pat.resid))
@@ -615,7 +620,7 @@ ranked_coefs_est
 ```
 
 ```{r}
-#plot(NSAA_tot ~ ., data = data_cc);lines(weighted.mean(data_cc$NSAA_tot))
+#plot(NSAA_tot ~ ., data = data.cc);lines(weighted.mean(data.cc$NSAA_tot))
 ```
 
 ```{r}
