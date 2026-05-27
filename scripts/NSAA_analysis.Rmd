@@ -4,6 +4,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+
 knitr::opts_chunk$set(echo = F)
 library(caret)
 library(dplyr)
@@ -19,6 +20,7 @@ library(ggbeeswarm)
 Define constants:
 
 ```{r}
+
 # random seed:
 student.number = 4645251
 
@@ -39,6 +41,7 @@ until LoA, which is needed to go on with the analysis.
 Load the data until LoA:
 
 ```{r data-cleaning}
+
 data = read.csv('../data/data_up_to_LoA.csv')
 # View(data)
 
@@ -53,6 +56,7 @@ cat('complete cases rows:', nrow(data.cc), '\n')
 
 How many patients do we now have with complete cases?
 ```{r}
+
 npatients = length(unique(data.cc$Patient_ID))
 cat('number of patients (=groups):', npatients)
 ```
@@ -62,6 +66,7 @@ our final mixed model with the selected predictors from the elastic net stage on
 that test set.
 
 ```{r}
+
 set.seed(student.number)
 
 test.patients = sample(
@@ -85,52 +90,62 @@ cat('test set patients:', length(test.patients))
 
 We are going to use grouped cross-validation since there is clustering (repeated measures).
 
-Here's the rationale for the number of groups held out in the grouped CV:
-We have 73 patients (groups), and 209 observations.
 
 First, we want to get an idea of the average # of obs per patient:
 ```{r}
-ntest.patients = length(test.patients)
-ntrainpatients = npatients - ntest.patients
-cat(round(nrow(df.train) / ntrainpatients, 3), 'avg obs / patient')
+
+ntest.pat = length(test.patients)
+ntrain.pat = npatients - ntest.pat
+cat(round(nrow(df.train) / ntrain.pat, 3), 'avg obs / patient')
 ```
 
 Since our dataset is relatively small, we will aim for a 90/10 training/validation
 split.
 
-In short: we want to hold out 10% for validation, and 10% of 73 patients is 7.3
+In short: we want to hold out 10% for validation, and 10% of 73 patients is 7.13
 patients on average to hold out.
 ( This means we will hold out 10% of 209 observations for validation = 20.9 obs.
-20.900 / 2.863 = 7.300 groups
-Therefore, we want to hold out 7.3 patients on average in each train/val split. )
+20.900 / 2.931 = 7.13 groups
+Therefore, we want to hold out 7.13 patients on average in each train/val split.)
 
-Which means: we will use k=10 folds in ``groupKFold()``.
+Which means we will use k=10 folds in ``groupKFold()``.
 
-Adjust the validation split as you wish below to get # folds:
+Adjust the validation split constant as you wish below to get # folds:
+
 ```{r}
+
 cat(paste0('validation split of ', val.split*100, '% gives ', round(1/val.split,1), ' folds'))
 ```
 
 Note that the number of visits of our patients has some variance, some patients 
-have until 8 visits. Thus, some validation splits might have much more than
+have up to 8 visits. Thus, some validation splits might have much more than
 20.9 observations.
 
 For this reason, we repeat the cross-validation 10 times to correct for the variance
-induced in the CV MSE by the variance in the number of visits per patient.
+induced in the CV RMSE by the variance in the number of visits per patient.
+
+
+Define predictor matrix and outcome vector:
+
+```{r}
+
+X = subset(df.train, select=-c(Patient_ID, NSAA_tot))
+X$TREAT = as.numeric(X$TREAT) - 1  # need to make TREAT binary to calculate inner products
+y = df.train$NSAA_tot
+```
+
+Build hyperparameter grid:
 
 ```{r make-tune-grid}
 
 nlambda = 100  # default in glmnet
-X = subset(df.train, select=-c(Patient_ID, NSAA_tot))
-X$TREAT = as.numeric(X$TREAT) - 1  # need to make TREAT binary to calculate inner products
-y = df.train$NSAA_tot
 
 compute_lambda_max = function(X.fold, y.fold, alpha) {
   # inspired by "Regularization paths for generalized linear models via coordinate descent" (Friedman, Hastie and Tibshirani, 2010)
   n = length(y.fold)
   # below, we standardise X, the same way glmnet does internally
   # during the CV, for consistency (we cross-checked with glmnet function).
-  # glmnet uses 1/n standard deviation, so we follow that here too
+  # glmnet uses 1/n standard deviation, so we apply that too:
   X.stand = scale(X.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
   abs.inner.prods = abs(crossprod(X.stand, y.fold))
   lambda.max = max(abs.inner.prods) / (n * alpha)
@@ -158,18 +173,6 @@ all.folds = lapply(random.seeds, function(seed) {
 
 # compute lambda.max for every training split (nfolds*nrepeat splits)
 alphas = seq(from=0, to=1, by=0.1)
-
-# scaled.folds = lapply(all.folds, function(cv.folds) {
-#     lapply(cv.folds, function(fold.indices) {
-#         X.fold = X[fold.indices,]
-#         y.fold = y[fold.indices]
-#         n = nrow(y.fold)
-#         # glmnet uses 1/n SD for normalisation
-#         X.scaled = scale(X.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
-#         y.scaled = scale(y.fold, center = TRUE, scale = TRUE) * sqrt(n / (n-1))
-#         list(X=X.scaled, y=y.scaled)
-#       })
-#   })
 
 all.lmax = lapply(alphas[-1], function(alpha) {
   unlist(lapply(all.folds, function(cv.folds) {
@@ -214,6 +217,8 @@ compute_lambdas = function(alpha) {
   }
 }
 
+
+# final tuning grid
 tune.grid = do.call(rbind, lapply(alphas, compute_lambdas))
 ```
 
@@ -222,8 +227,7 @@ Run CV:
 ```{r grouped-cv}
 
 # we don't need Patient_ID anymore from here on
-df_train_PID= df.train
-df.train = subset(df.train, select=-Patient_ID)
+df.cv = subset(df.train, select=-Patient_ID)
 
 elastic_net_grouped_CV = function(i) {
   
@@ -237,7 +241,7 @@ elastic_net_grouped_CV = function(i) {
 
   elastic_net = train(
     NSAA_tot ~ .
-    , data=df.train
+    , data=df.cv
     , method='glmnet'
     , standardize = TRUE
     , trControl=train.control
@@ -284,22 +288,18 @@ best.pairs = avg.rmse.grid %>%
   do.call(rbind, .)
 
 ```
+
 Note: the "There were missing values in resampled performance measures." warnings
 are normal, when the lambda being fitted with is equal or greater than lambda.max
 in some folds, the r-squared is NaN since the variance of the predictions is zero (intercept model).
 
-Diagnose the lambda situation:
-```{r}
-model.results = models[7][[1]]$results
-model.results[model.results$alpha==0.9,]
-```
-
 
 Now that we have our best (alpha, lambda) pairs, we refit an elastic net to
-our entire training set with each of these pairs:
+our entire training set with each of these pairs to obtain Table 3 of our report:
 
 ```{r}
-all.nonzero.params = list()
+
+all.nonzero.preds = list()
 
 for (i in 1:nrow(best.pairs)) {
   
@@ -318,11 +318,11 @@ for (i in 1:nrow(best.pairs)) {
     , lambda=lambda
   )
   coefs = coef(fit)[-1,]  # drop the intercept, we don't need it here
-  nonzero.params = names(which(coefs != 0))
-  all.nonzero.params[[i]] = nonzero.params
+  nonzero.preds = names(which(coefs != 0))
+  all.nonzero.preds[[i]] = nonzero.preds
   
   # check condition number
-  mat.predictors = as.matrix(X[, nonzero.params])
+  mat.predictors = as.matrix(X[, nonzero.preds])
   cond.num = kappa(t(mat.predictors) %*% mat.predictors)
   
   print(paste('pair number', i, ' (alpha='
@@ -331,7 +331,7 @@ for (i in 1:nrow(best.pairs)) {
         , round(lambda, 3)
         , '): '
         , '# non-zero predictors: '
-        , length(nonzero.params)
+        , length(nonzero.preds)
         , ', kappa = '
         , round(cond.num, 3)
         , ', CV RMSE = '
@@ -343,135 +343,144 @@ for (i in 1:nrow(best.pairs)) {
 ```
 
 The retained (non-zero) predictors of pair number 'n' are stored in
-``all.nonzero.params[[n]]``.
+``all.nonzero.preds[[n]]``.
 
 ```{r}
+
 # pair with the lowest condition number and smallest predictor set:
-# all.nonzero.params[[8]]
-# proteins = list(proteins=all.nonzero.params[[9]])
-# write.csv(proteins, 'final_proteins.csv', row.names = F)
-df = read.csv('../data/final_proteins.csv')
-selected.proteins = df$proteins
-selected.proteins
+# all.nonzero.preds[[8]]
+best.index = 8
+proteins = list(proteins=all.nonzero.preds[[best.index]])
+write.csv(proteins, 'stage1_proteins.csv', row.names = F)
+df = read.csv('../data/stage1_proteins.csv')
+(stage1.proteins = df$proteins)
 ```
 
-Fit elastic net with best parameters
+Fit elastic net with best parameters:
 
 ```{r}
+
 # Model with covariates
-num_cols = setdiff(names(df_train_PID), c("NSAA_tot", "Patient_ID", "TREAT"))
-train_mean = sapply(df_train_PID[, num_cols], mean)
-train_sd = sapply(df_train_PID[, num_cols], sd)
-train_sd[train_sd == 0] = 1
+continuous.cols = setdiff(names(df.train), c("NSAA_tot", "Patient_ID", "TREAT"))
+train.mean = sapply(df.train[, continuous.cols], mean)
+train.sd = sapply(df.train[, continuous.cols], sd)
+train.sd[train.sd == 0] = 1
 
 # scale
-df.train_scaled = df_train_PID
-df.train_scaled[, num_cols] = scale(df_train_PID[, num_cols], center = train_mean, scale = train_sd)
+df.train.scaled = df.train
+df.train.scaled[, continuous.cols] = scale(df.train[, continuous.cols], center = train.mean, scale = train.sd)
 
-df.test_scaled = df.test
-df.test_scaled[, num_cols] = scale(df.test[, num_cols], center = train_mean, scale = train_sd)
+df.test.scaled = df.test
+df.test.scaled[, continuous.cols] = scale(df.test[, continuous.cols], center = train.mean, scale = train.sd)
 
-parameters.with.cov = c("age", "TREAT", setdiff(selected.proteins, c("age", "TREAT")))
+predictors.with.cov = c("age", "TREAT", setdiff(stage1.proteins, c("age", "TREAT")))
 ```
 
 
-Extension (round 2):
-```{r}
-pat.counts = df_train_PID %>% count(Patient_ID)
+Stage 2 C-EN (cluster-informed elastic net):
 
-# build design matrix of random effects:
-Z = matrix(0, ntrain, ntrainpatients)
+```{r}
+
+pat.counts = df.train %>% count(Patient_ID)
+
+# build design matrix of random intercepts:
+Z = matrix(0, ntrain, ntrain.pat)
 i = 1
-for (j in 1:ntrainpatients) {
+for (j in 1:ntrain.pat) {
   n.visits = pat.counts$n[j]
   Z[i:(i+n.visits-1), j] = 1
   i = i + n.visits
 }
 
-# build proxy ranef matrix:
-M = log(ntrainpatients) * diag(ntrainpatients)
+# proxy matrix of random effects covariance
+M = log(ntrain.pat) * diag(ntrain.pat)
 Pz = solve( diag(ntrain) + Z %*% M %*% t(Z) )
 
 # cholesky decomp & define new y and X
 # chol() returns upper triangular factor
 U = chol(Pz)
 
-y = df.train_scaled$NSAA_tot
-X = subset(df.train_scaled, select=parameters.with.cov)
+y = df.train.scaled$NSAA_tot
+X = subset(df.train.scaled, select=predictors.with.cov)
 X$TREAT = as.numeric(X$TREAT) - 1
 X = as.matrix(X)
 y.tilde = U %*% y
 X.tilde = U %*% X
 
 # elastic net regularisation
-alpha = best.pairs$alpha[8]
-lambda = best.pairs$best.lambda[8]
+alpha = best.pairs$alpha[best.index]
+lambda = best.pairs$best.lambda[best.index]
+
 fit = glmnet(X.tilde, y.tilde, alpha=alpha, lambda=lambda)
-coef.round2 = coef(fit)[-1,]
-nonzero.proteins.round2 = names(which(coef.round2 != 0))
+
+coef.2 = coef(fit)[-1,]
+nonzero.preds.2 = names(which(coef.2 != 0))
 
 # fit the random intercept LMM
-predictors.round2 = c(
-  "age", "TREAT", setdiff(nonzero.proteins.round2, c("age", "TREAT"))
+predictors.2 = c(
+  "age", "TREAT", setdiff(nonzero.preds.2, c("age", "TREAT"))
 )
-formula.round2 = as.formula(
-  paste("NSAA_tot ~", paste(predictors.round2, collapse = " + ")
+formula.2 = as.formula(
+  paste("NSAA_tot ~", paste(predictors.2, collapse = " + ")
         , "+ (1 | Patient_ID)")
 )
-lmm.round2 = lmer(formula.round2, data = df.train_scaled)
-summary(lmm.round2)
 
-# hold out prediction
-y.pred.round2 = predict(
-  lmm.round2,
-  newdata = df.test_scaled,
+lmm = lmer(formula.2, data = df.train.scaled)
+summary(lmm)
+# conditional & marginal R²:
+r.squaredGLMM(lmm)
+
+# test set prediction
+y.pred = predict(
+  lmm,
+  newdata = df.test.scaled,
   allow.new.levels = TRUE
 )
 
-y.test = df.test_scaled$NSAA_tot
-rmse.test.round2 = sqrt(mean((y.test - y.pred.round2)^2))
-rmse.test.round2
+y.test = df.test.scaled$NSAA_tot
+rmse.test = sqrt(mean((y.test - y.pred)^2))
+rmse.test
 
-r2.test.round2 = 1 - sum((y.test - y.pred.round2)^2) / sum((y.test - mean(y.test))^2)
-r2.test.round2
-```
-save final proteins:
-```{r}
-# write.csv(nonzero.proteins.round2, '../data/proteins_round2.csv', row.names = F)
+r2.test = 1 - sum((y.test - y.pred)^2) / sum((y.test - mean(y.test))^2)
+r2.test
 ```
 
-
+Save final proteins:
 ```{r}
-r.squaredGLMM(lmm.round2)
+
+write.csv(nonzero.preds.2, '../data/final_proteins.csv', row.names = F)
 ```
 
 WITH RANDOM INTERCEPT + SLOPE:
 ```{r}
+
 rslope.formula = as.formula(
-  paste("NSAA_tot ~", paste(predictors.round2, collapse = " + ")
+  paste("NSAA_tot ~", paste(predictors.2, collapse = " + ")
         , "+ (1 + age | Patient_ID)")
 )
 
-lmm.round2.rslope = lmer(rslope.formula, data = df.train_scaled)
-summary(lmm.round2.rslope)
+lmm.rslope = lmer(rslope.formula, data = df.train.scaled)
+summary(lmm.rslope)
 ```
 
 Model comparison:
 ```{r}
-anova(lmm.round2, lmm.round2.rslope)
+
+anova(lmm, lmm.rslope)
 ```
 Check: not worth it to add a random slope on age.
 
 R² per-patient:
 
 ```{r}
+
 per_patient_rmse = function(pat) {
 
-    df.pat = df.test_scaled[df.test_scaled$Patient_ID == pat,]
+    df.pat = df.test.scaled[df.test.scaled$Patient_ID == pat,]
     y.test = df.pat$NSAA_tot
 
     y.pred = predict(
-      lmm.round2,
+      lmm,
       newdata = df.pat,
       allow.new.levels = TRUE
     )
@@ -479,45 +488,46 @@ per_patient_rmse = function(pat) {
     
     c(
       Patient_ID=pat
-      , n.obs=nrow(df.pat)
+      , nobs=nrow(df.pat)
       , RMSE = rmse
     )
 }
 
 test.patients = sort(test.patients)
 test.results = as.data.frame(t(sapply(test.patients, per_patient_rmse)))
-test.results = test.results[order(test.results$n.obs),]
+test.results = test.results[order(test.results$nobs),]
 rownames(test.results) = NULL
 test.results
 
-png(filename = '../plots/per_patient_RMSE.png', res=150, width=1200, height=900)
-ggplot(test.results, aes(x=factor(n.obs), y=RMSE, color=n.obs)) +
+# png(filename = '../plots/per_patient_RMSE.png', res=150, width=1200, height=900)
+ggplot(test.results, aes(x=factor(nobs), y=RMSE, color=nobs)) +
   labs(x='Patient visits', y='Patient RMSE') +
   geom_beeswarm(size=4) +
-  geom_hline(yintercept=rmse.test.round2, lty=2, color='grey50', linewidth=0.6) +
+  geom_hline(yintercept=rmse.test, lty=2, color='grey50', linewidth=0.6) +
   scale_color_gradient(low='cyan3', high='darkblue') +
   ggtitle('Per-patient test RMSE') +
   theme(legend.position='none', plot.title=element_text(face='bold')) +
   annotate(
     'text',
-    x=max(test.results$n.obs)+1,
-    y=rmse.test.round2,
+    x=max(test.results$nobs)+1,
+    y=rmse.test,
     label='Full-sample test RMSE',
     color='grey40',
     hjust=1.1,
     vjust=-0.6,
     size=3.3
 )
-dev.off()
+# dev.off()
 ```
 
 
-Checking linearity:
+Check LMM assumptions:
 
 ```{r}
-fitted.val = fitted(lmm.round2)
-raw.resid = resid(lmm.round2)
-jack.resid = rstudent(lmm.round2)
+
+fitted.val = fitted(lmm)
+raw.resid = resid(lmm)
+jack.resid = rstudent(lmm)
 
 # obs vs fitted
 plot(fitted.val, df.train$NSAA_tot
@@ -526,21 +536,25 @@ plot(fitted.val, df.train$NSAA_tot
      , main='Observed NSAA_tot vs fitted values')
 
 # qq plots
+# JACK:
 # png(filename = '../plots/jack_qq.png', res=150, width=1200, height=900)
 qqnorm(jack.resid, main = 'Jackknife conditional residuals Q-Q plot')
 qqline(jack.resid, col = "red")
 # dev.off()
-
+# RAW:
 qqnorm(raw.resid, main = 'Raw conditional residual Q-Q plot')
 qqline(raw.resid, col = "red")
 
 # histograms
+# JACK:
 hist(jack.resid, breaks = 30, main = 'Jackknife conditional residuals histogram', 
      xlab='Jackknife conditional residual')
+# RAW:
 hist(raw.resid, breaks = 30, main = 'Raw conditional residuals histogram', 
      xlab='Raw conditional residual')
 
 # resid vs fitted
+# RAW:
 plot(fitted.val, raw.resid,
      xlab = "Fitted value",
      ylab = "Raw conditional residual",
@@ -549,7 +563,8 @@ abline(h = 0, col = "red")
 lines(lowess(fitted.val, raw.resid),
       col = "blue", lwd = 2)
 
-png(filename = '../plots/jack_vs_fitted.png', res=150, width=1200, height=900)
+# JACK:
+# png(filename = '../plots/jack_vs_fitted.png', res=150, width=1200, height=900)
 plot(fitted.val, jack.resid,
      xlab = "Fitted value",
      ylab = "Residual",
@@ -557,16 +572,16 @@ plot(fitted.val, jack.resid,
 abline(h = 0, col = "red")
 lines(lowess(fitted.val, jack.resid),
       col = "blue", lwd = 2)
-dev.off()
-```
-Here we look at the random effects diagnostic plots:
+# dev.off()
 
-```{r}
-ran.int = ranef(lmm.round2)$Patient_ID
-jack.resid = rstudent(lmm.round2)
+
+
+# random effects diagnostic plots:
+ran.int = ranef(lmm)$Patient_ID
+jack.resid = rstudent(lmm)
 
 dfs = lapply(trainpatients, function(p){
-      rows = rownames(df_train_PID[df_train_PID$Patient_ID == p,])
+      rows = rownames(df.train[df.train$Patient_ID == p,])
       pat.resid = unname(jack.resid[rows])
       pat.ranint = rep(ran.int[as.character(p),], length(pat.resid))
       data.frame(residual=pat.resid, ranint=pat.ranint)
@@ -612,7 +627,8 @@ ggplot(ran.int, aes(x=`(Intercept)`)) +
 Rank coefficients:
 
 ```{r}
-coefs.model = summary(lmm.round2)$coefficients
+
+coefs.model = summary(lmm)$coefficients
 coefs.model = coefs.model[rownames(coefs.model) != "(Intercept)", ]
 coefs.model
 
@@ -625,9 +641,8 @@ ranked_coefs_est = ranked_coefs_est[order(abs(ranked_coefs_est$estimate), decrea
 ranked_coefs_est
 ```
 
-```{r}
-#plot(NSAA_tot ~ ., data = data.cc);lines(weighted.mean(data.cc$NSAA_tot))
-```
+
+Check for influential patients:
 
 ```{r}
 library(lme4)
@@ -635,7 +650,7 @@ library(influence.ME)
 
 model_lme4 <- lme4::lmer(
   NSAA_tot ~ X10440.26 + X11277.23+ X12549.33+ X13114.50+ X15386.7+ X15559.5+  X19630.2+  X3220.40+  X3709.4+  X4929.55+  X5000.52+  X5483.1+   X5542.22+  X5864.10+  X7970.315+ X8080.24+ X8300.82+  X8484.24+ X9851.9 +
-    age + TREAT + (1 | Patient_ID), data = df.train_scaled)
+    age + TREAT + (1 | Patient_ID), data = df.train.scaled)
 
 infl <- influence(model_lme4, group = "Patient_ID")
 
@@ -645,7 +660,5 @@ plot(cd, type = "h",
      xlab = "Patient",
      main = "Patient-level influence")
 
-plot(cd, main = "Cooks Distance for Influential Obs");abline(h = 4/length(unique(df.train_scaled$Patient_ID)), lty = 2, col = "steelblue")
-
-
+plot(cd, main = "Cooks Distance for Influential Obs");abline(h = 4/length(unique(df.train.scaled$Patient_ID)), lty = 2, col = "steelblue")
 ```
