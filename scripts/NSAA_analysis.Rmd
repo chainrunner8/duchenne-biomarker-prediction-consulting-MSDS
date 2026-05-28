@@ -19,7 +19,7 @@ library(ggbeeswarm)
 
 Define constants:
 
-```{r}
+```{r constants}
 
 # random seed:
 student.number = 4645251
@@ -55,7 +55,7 @@ cat('complete cases rows:', nrow(data.cc), '\n')
 ```
 
 How many patients do we now have with complete cases?
-```{r}
+```{r npatients}
 
 npatients = length(unique(data.cc$Patient_ID))
 cat('number of patients (=groups):', npatients)
@@ -65,7 +65,7 @@ We first make an initial 80%/20% training/test split. We will evaluate the perfo
 our final mixed model with the selected predictors from the elastic net stage on
 that test set.
 
-```{r}
+```{r data-split}
 
 set.seed(student.number)
 
@@ -92,7 +92,8 @@ We are going to use grouped cross-validation since there is clustering (repeated
 
 
 First, we want to get an idea of the average # of obs per patient:
-```{r}
+
+```{r patients-split}
 
 ntest.pat = length(test.patients)
 ntrain.pat = npatients - ntest.pat
@@ -112,7 +113,7 @@ Which means we will use k=10 folds in ``groupKFold()``.
 
 Adjust the validation split constant as you wish below to get # folds:
 
-```{r}
+```{r cv-folds}
 
 cat(paste0('validation split of ', val.split*100, '% gives ', round(1/val.split,1), ' folds'))
 ```
@@ -127,7 +128,7 @@ induced in the CV RMSE by the variance in the number of visits per patient.
 
 Define predictor matrix and outcome vector:
 
-```{r}
+```{r xy-data-split}
 
 X = subset(df.train, select=-c(Patient_ID, NSAA_tot))
 X$TREAT = as.numeric(X$TREAT) - 1  # need to make TREAT binary to calculate inner products
@@ -297,7 +298,7 @@ in some folds, the r-squared is NaN since the variance of the predictions is zer
 Now that we have our best (alpha, lambda) pairs, we refit an elastic net to
 our entire training set with each of these pairs to obtain Table 3 of our report:
 
-```{r}
+```{r best-tuned-models}
 
 all.nonzero.preds = list()
 
@@ -345,7 +346,7 @@ for (i in 1:nrow(best.pairs)) {
 The retained (non-zero) predictors of pair number 'n' are stored in
 ``all.nonzero.preds[[n]]``.
 
-```{r}
+```{r save-stage1-proteins}
 
 # pair with the lowest condition number and smallest predictor set:
 # all.nonzero.preds[[8]]
@@ -358,7 +359,7 @@ df = read.csv('../data/stage1_proteins.csv')
 
 Fit elastic net with best parameters:
 
-```{r}
+```{r stage2-data-preprocess}
 
 # Model with covariates
 continuous.cols = setdiff(names(df.train), c("NSAA_tot", "Patient_ID", "TREAT"))
@@ -376,10 +377,9 @@ df.test.scaled[, continuous.cols] = scale(df.test[, continuous.cols], center = t
 predictors.with.cov = c("age", "TREAT", setdiff(stage1.proteins, c("age", "TREAT")))
 ```
 
-
 Stage 2 C-EN (cluster-informed elastic net):
 
-```{r}
+```{r stage2-c-en}
 
 pat.counts = df.train %>% count(Patient_ID)
 
@@ -415,6 +415,12 @@ fit = glmnet(X.tilde, y.tilde, alpha=alpha, lambda=lambda)
 
 coef.2 = coef(fit)[-1,]
 nonzero.preds.2 = names(which(coef.2 != 0))
+write.csv(nonzero.preds.2, '../data/final_proteins.csv', row.names = F)
+```
+
+Finally, fit stage 3 LMM and eval on test set:
+
+```{r stage3-lmm-eval}
 
 # fit the random intercept LMM
 predictors.2 = c(
@@ -445,14 +451,9 @@ r2.test = 1 - sum((y.test - y.pred)^2) / sum((y.test - mean(y.test))^2)
 r2.test
 ```
 
-Save final proteins:
-```{r}
+Test for RANDOM INTERCEPT + SLOPE:
 
-write.csv(nonzero.preds.2, '../data/final_proteins.csv', row.names = F)
-```
-
-WITH RANDOM INTERCEPT + SLOPE:
-```{r}
+```{r rslope-lmm}
 
 rslope.formula = as.formula(
   paste("NSAA_tot ~", paste(predictors.2, collapse = " + ")
@@ -461,18 +462,15 @@ rslope.formula = as.formula(
 
 lmm.rslope = lmer(rslope.formula, data = df.train.scaled)
 summary(lmm.rslope)
-```
-
-Model comparison:
-```{r}
 
 anova(lmm, lmm.rslope)
 ```
+
 Check: not worth it to add a random slope on age.
 
-R² per-patient:
+RMSE per-patient:
 
-```{r}
+```{r per-pat-rmse}
 
 per_patient_rmse = function(pat) {
 
@@ -520,10 +518,9 @@ ggplot(test.results, aes(x=factor(nobs), y=RMSE, color=nobs)) +
 # dev.off()
 ```
 
-
 Check LMM assumptions:
 
-```{r}
+```{r lmm-diag-plots}
 
 fitted.val = fitted(lmm)
 raw.resid = resid(lmm)
@@ -626,7 +623,7 @@ ggplot(ran.int, aes(x=`(Intercept)`)) +
 
 Rank coefficients:
 
-```{r}
+```{r rank-coefs}
 
 coefs.model = summary(lmm)$coefficients
 coefs.model = coefs.model[rownames(coefs.model) != "(Intercept)", ]
@@ -644,7 +641,7 @@ ranked_coefs_est
 
 Check for influential patients:
 
-```{r}
+```{r influential-patients}
 library(lme4)
 library(influence.ME)
 
