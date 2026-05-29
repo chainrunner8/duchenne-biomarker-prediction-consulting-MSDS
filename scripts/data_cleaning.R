@@ -1,7 +1,4 @@
 
-library(ggplot2)
-library(dplyr)
-
 # This script slices out the visits after LoA and handles inconsistencies in the selected data.
 # For this script to work properly, please create a folder named "data" in the root
 # directory of the repository, and put the original data file in this "data" folder.
